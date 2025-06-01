@@ -1,25 +1,24 @@
 local M = {}
 
 local function fail(s, ...)
-	ya.notify({ title = "Eza Preview", content = string.format(s, ...), timeout = 5, level = "error" })
+	ya.notify({
+		title = "Eza Preview",
+		content = string.format(s, ...),
+		timeout = 5,
+		level = "error"
+	})
 end
 
 local toggle_view_mode = ya.sync(function(state, _)
-	if state.tree == nil then
-		state.tree = false
-	end
-
 	state.tree = not state.tree
 end)
 
 local is_tree_view_mode = ya.sync(function(state, _)
-	return state.tree
+	return state.tree or false
 end)
 
 local set_opts = ya.sync(function(state, opts)
-	if state.opts == nil then
-		state.opts = { level = 3, follow_symlinks = false, dereference = false }
-	end
+	state.opts = state.opts or { level = 3, follow_symlinks = false, dereference = false }
 
 	for key, value in pairs(opts or {}) do
 		state.opts[key] = value
@@ -27,6 +26,7 @@ local set_opts = ya.sync(function(state, opts)
 end)
 
 local get_opts = ya.sync(function(state)
+	state.opts = state.opts or { level = 3, follow_symlinks = false, dereference = false }
 	return state.opts
 end)
 
@@ -46,18 +46,17 @@ end)
 
 function M:setup(opts)
 	set_opts(opts)
-
 	toggle_view_mode()
 end
 
 function M:entry(job)
 	local args = job.args
 
-	if args["inc_level"] ~= nil then
+	if args["inc_level"] then
 		inc_level()
-	elseif args["dec_level"] ~= nil then
+	elseif args["dec_level"] then
 		dec_level()
-	elseif args["toggle_follow_symlinks"] ~= nil then
+	elseif args["toggle_follow_symlinks"] then
 		toggle_follow_symlinks()
 	else
 		set_opts()
@@ -69,6 +68,7 @@ end
 
 function M:peek(job)
 	local opts = get_opts()
+	local is_tree = is_tree_view_mode()
 
 	local args = {
 		"--all",
@@ -79,22 +79,20 @@ function M:peek(job)
 		tostring(job.file.url),
 	}
 
-	if is_tree_view_mode() then
+	if is_tree then
 		table.insert(args, "--tree")
 		table.insert(args, string.format("--level=%d", opts.level))
 	end
 
-	if opts then
-		if opts.follow_symlinks then
-			table.insert(args, "--follow-symlinks")
-		end
-
-		if opts.dereference then
-			table.insert(args, "--dereference")
-		end
+	if opts.follow_symlinks then
+		table.insert(args, "--follow-symlinks")
 	end
 
-	local child = Command("eza"):args(args):stdout(Command.PIPED):stderr(Command.PIPED):spawn()
+	if opts.dereference then
+		table.insert(args, "--dereference")
+	end
+
+	local child = Command("eza"):arg(args):stdout(Command.PIPED):stderr(Command.PIPED):spawn()
 
 	local limit = job.area.h
 	local lines = ""
@@ -105,7 +103,8 @@ function M:peek(job)
 	repeat
 		local line, event = child:read_line()
 		if event == 1 then
-			fail(tostring(event))
+			fail("eza error: %s", line)
+			break
 		elseif event ~= 0 then
 			break
 		end
@@ -118,13 +117,12 @@ function M:peek(job)
 		end
 	until num_lines >= limit
 
-	if num_lines == 1 and not is_tree_view_mode() then
-		empty_output = true
-	elseif num_lines == 2 and is_tree_view_mode() then
+	child:start_kill()
+
+	if (not is_tree and num_lines == 1) or (is_tree and num_lines == 2) then
 		empty_output = true
 	end
 
-	child:start_kill()
 	if job.skip > 0 and num_lines < limit then
 		ya.manager_emit("peek", {
 			tostring(math.max(0, job.skip - (limit - num_lines))),
@@ -136,14 +134,16 @@ function M:peek(job)
 			ui.Text({ ui.Line("No items") }):area(job.area):align(ui.Text.CENTER),
 		})
 	else
-		ya.preview_widgets(job, { ui.Text.parse(lines):area(job.area) })
+		ya.preview_widgets(job, {
+			ui.Text.parse(lines):area(job.area)
+		})
 	end
 end
 
 function M:seek(job)
-	local h = cx.active.current.hovered
+	local hovered = cx.active.current.hovered
 
-	if h and h.url == job.file.url then
+	if hovered and hovered.url == job.file.url then
 		local step = math.floor(job.units * job.area.h / 10)
 
 		ya.manager_emit("peek", {
